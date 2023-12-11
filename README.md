@@ -1,4 +1,4 @@
-# GPU Programming Knapsack
+#  GPU Programming Knapsack
 ## Evaluating Expressions
 One of the variants of Genetic Algorithms is Genetic Programming, where individuals are programs (expressed as trees) instead of being expressed as an array of integers. Evaluation of programs is more complex, but since individuals can be evaluated in parallel, we can make use of the GPU.
 
