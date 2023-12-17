@@ -9,83 +9,56 @@ import pandas as pd
 kernel_code = """
 #include <stdio.h>
 
-__global__ void score_kernel(float* result, float* data, int N) {
+__global__ void score_kernel(float* result, char* line, int N) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-
-    // Certificar de que o índice está dentro dos limites do conjunto de dados
     if (idx < N) {
-        // Avaliação da expressão para o conjunto de dados
-        float a = data[idx];
-
-        //for u in ["sinf", "cosf", "tanf", "sqrtf", "expf"]:
-        //line = line.replace(u, f"np.{u[:-1]}")
-
-        ////////////////////////////////////////
-        //esta versão é sequencial, só pra me basear por aqui
-      //  for c in df.columns:
-        //    line = line.replace(f"_{c}_", f"(df[\"{c}\"].values)")
-        //a = eval(line)
-        //b = df["y"]
-        //e = np.square(np.subtract(a, b)).mean()
-        //////////////////////////////
-
-        // Cálculo da pontuação (erro médio quadrático)
-        float expression_result = a;  // Substitua pela lógica da sua expressão
-        float error = expression_result;
-        result[idx] = error * error;
-
-        // Sincronização para garantir que todos os threads tenham calculado o erro antes da redução
-        __syncthreads();
-
-        // Redução do erro usando somas em árvore
-        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-            if (threadIdx.x < stride) {
-                result[idx] += result[idx + stride];
-            }
-            // Sincronização a cada iteração do loop
-            __syncthreads();
-        }
-
-        // O thread 0 de cada bloco armazena o resultado parcial na posição 0 do bloco
-        if (threadIdx.x == 0) {
-            result[blockIdx.x] = result[idx];
-        }
+        char* evaluated_line = {evaluate_line(line)};
+        result[idx] = evaluated_line;
     }
 }
 
 """
 
+def evaluate_line(line) :
+    for u in ["sinf", "cosf", "tanf", "sqrtf", "expf"]:
+        line = line.replace(u, f"np.{u[:-1]}")
+    for c in df.columns:
+        line = line.replace(f"_{c}_", f"(df[\"{c}\"].values)")
+    return line
+    
+a = eval(line)
+b = df["y"]
+e = np.square(np.subtract(a, b)).mean()
+
 # Compilação do Kernel CUDA
-mod = SourceModule(kernel_code)
-score_kernel = mod.get_function("score_kernel")
+score_kernel = SourceModule(kernel_code).get_function("score_kernel")
 
 df = pd.read_csv("data.csv")
-
 funs = [ line.strip() for line in open("functions.txt").readlines() ]
 
-def parallel_score(data):
-    # Tamanho do conjunto de dados
-    N = len(data)
+def parallel_score(l):
+
+    N = len(df)
 
     # Alocar memória na GPU
-    d_result = cuda.mem_alloc(N * 4)  # Tamanho em bytes para float
+    d_result = cuda.mem_alloc(N * np.float32)  # 4 é o tamanho em bytes para float
 
     # Transferir dados para a GPU
     #d_data = cuda.to_device(data.astype(np.float32))
-    d_data = cuda.to_device(data.encode())
+    line = cuda.to_device(l.encode())
     #d_y = cuda.to_device(y.astype(np.float32))
 
-   # Configuração do lançamento do kernel
-   # block_size = 256
-   # grid_size = (N + block_size - 1) // block_size
+    block_size = 1024
+    #grid_size = N // block_size
+    grid_size = (N + block_size - 1) // block_size
 
     # Executar o kernel na GPU
-    score_kernel(d_result, d_data, block=(N, 1, 1), grid=(1, 1))
-    #score_kernel(d_result, d_data, block=(block_size, 1, 1), grid=(grid_size, 1))
+    #score_kernel(d_result, d_data, block=(N, 1, 1), grid=(1, 1))
+    score_kernel(d_result, line, block=(block_size, 1, 1), grid=(grid_size, 1))
 
     # Transferir resultados da GPU de volta para a CPU
     result = np.empty(N, dtype=np.float32)
-    cuda.memcpy_dtoh(result, d_result) # isto n é descessessário já que fazemos o return do result?
+    cuda.memcpy_dtoh(result, d_result)
 
     # Libertar recursos na GPU
     d_result.free()

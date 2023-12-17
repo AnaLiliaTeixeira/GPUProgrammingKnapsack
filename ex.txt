@@ -1,0 +1,32 @@
+def get_kernels(line, size):
+    for u in ["sinf", "cosf", "tanf", "sqrtf", "expf"]:
+        line = line.replace(u, f"{u[:-1]}")
+
+    line = line.replace("sqrt", f"SAFESQRT")
+    for c in df.columns:
+        line = line.replace(f"{c}_", f"({c}[i{size}])")
+
+    kernel_func = f'''global void calculate{size}({all_variables_string})
+{{
+
+    int i{size} = threadIdx.x; //cada i eh um valor das variaveis
+    extern shared double store_value_matrix[NUMBER_ROW];
+    while(i{size} < NUMBER_ROW){{
+     }}
+    __syncthreads();
+
+    for (int s=1; s < blockDim.x; s= 2) {{
+      int index = 2 * s * threadIdx.x;
+      if (index < blockDim.x) {{
+        store_value_matrix[index] += store_value_matrix[index + s];
+      }}
+      __syncthreads();
+    }}
+
+    if (threadIdx.x == 0){{
+      store_return_value[{size}] = store_value_matrix[{size}] /NUMBER_ROW;
+    }}
+
+}}'''
+
+    return kernel_func
