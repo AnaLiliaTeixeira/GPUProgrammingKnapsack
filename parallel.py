@@ -7,28 +7,40 @@ import pandas as pd
 
 df = pd.read_csv("data.csv")
 blocksNumber = 1024
+N = len(df)
+
 
 # Definição do Kernel CUDA
 def evaluate_line(line):
     for u in ["sinf", "cosf", "tanf", "sqrtf", "expf"]:
         line = line.replace(u, f"np.{u[:-1]}")
+    #line = line.replace("sqrtf", f"SAFESQRT")
     for c in df.columns:
         line = line.replace(f"_{c}_", f"(df[\"{c}\"].values)")
         #line = line.replace(f"_{c}_", f"({c}[idx])")
 
     return eval(line)
 
-kernel_code = f"""
-# include <stdio.h>
+#define SAFE_SQRT(x) ((x) >= 0 ? sqrt(x) : 0)
 
-__global__ void score_kernel(float evaluatedLine, float minimum, float* y) {{
+kernel_code = f""" 
+
+__global__ void score_kernel(float** evaluatedLineArray, float* y, float* minimum) 
+{{
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     __shared__ float linesEvaluated[{blocksNumber}];
+
     while (idx < {blocksNumber}) {{
-        linesEvaluated[idx] = (evaluatedLine-y[idx]) * (evaluatedLine-y[idx]);
-        idx += blockDim.x * gridDim.x;
+        for (int j = 0; j < {N}; j++) {{
+            linesEvaluated[idx] += (evaluatedLineArray[idx][j] - y[j]) * (evaluatedLineArray[idx][j] - y[j]);
+        }}
+
+        linesEvaluated[idx] /= {N};
+        idx += blockDim.x * gridDim.x;  // Atualize idx para o próximo bloco
     }}
+
     __syncthreads();
+
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
         if (linesEvaluated[threadIdx.x + s] < linesEvaluated[threadIdx.x]) {{
@@ -39,69 +51,91 @@ __global__ void score_kernel(float evaluatedLine, float minimum, float* y) {{
 
     if (threadIdx.x == 0) {{
         for (int i = 1; i < {blocksNumber}; i++) {{
-            minimum += linesEvaluated[i];
+            minimum[0] += linesEvaluated[i];
         }}
-        minimum /= {blocksNumber};
+        minimum[0] /= {blocksNumber};
     }}
+}}
+"""
 
-
-}}"""
-
-    
 # Compilação do Kernel CUDA
 score_kernel = SourceModule(kernel_code).get_function("score_kernel")
 
-funs = [ line.strip() for line in open("functions.txt").readlines() ]
+funs = [line.strip() for line in open("functions.txt").readlines()]
 
-def parallel_score(line):
+def parallel_score():
 
-    N = len(df)
+    # Criar host_evaluatedLineArray com tratamento de nan
+    host_evaluatedLineArray = np.array([np.nan_to_num(evaluate_line(line)) for line in funs], dtype=np.float32)
 
-    # criar input e output
-    y = df["y"]
-    y_np = np.array(df["y"].values, dtype=np.float32)
-    #y_np = .astype(np.float32)
-    #host = line
-    #dev = np.zeros(N, np.float32) # output array com a media de todas as funções
-    # faço o np.square(np.subtract(a, b)).mean() para cada um no gpu?
+    #host_evaluatedLineArray = np.array([evaluate_line(line) for line in funs], dtype=np.float32)
+    host_y = np.array(df["y"], dtype=np.float32)
+    host_minimum = np.zeros(1, dtype=np.float32)
     
-    # Avaliar a linha no host
-    evaluated_line = np.array(evaluate_line(line), dtype=np.float32)
-    #evaluated_line = evaluate_line(line)
+    for i in host_evaluatedLineArray:
+      if np.NaN in i:
+        print("NAN")
+      #print(i)
+    #print(host_evaluatedLineArray.shape[0])
+    #print(host_evaluatedLineArray.shape[1])
+    #print(len(host_evaluatedLineArray) * np.float32().nbytes)
 
-    # Alocar memória na GPU para o host e para o dev
-    #host_gpu = cuda.mem_alloc(4) #alocar o tamanho do input na memoria da gpu # 4 é o tamanho em bytes para float
-    #dev_result = cuda.mem_alloc(N * 4) #alocar o tamanho do array output na memoria da gpu # 4 é o tamanho em bytes para float
+    # Alocar memória na GPU
+    #dev_evaluatedLineArray = cuda.to_device(host_evaluatedLineArray)
+    # Obtém informações sobre a memória alocada na GPU
+
+      # Get information about the allocated memory
+    mem_info = cuda.mem_get_info()
+
+    print("Total free memory before allocating mm::", mem_info.free_memory)
+    print("Free memory in L1 memory pool:", mem_info.l1_free_memory)
+    print("Free memory in L2 memory pool:", mem_info.l2_free_memory)
+    print("Free memory in shared memory pool:", mem_info.shared_memory_free)
+    print("Alignment requirement for float32:", cuda.align_val(np.float32()))
+
+
+    dev_evaluatedLineArray = cuda.mem_alloc(host_evaluatedLineArray.shape[0] * host_evaluatedLineArray.shape[1] * np.float32().nbytes)
+    dev_y = cuda.mem_alloc(N * np.float32().nbytes) #alocar o tamanho do array output na memoria da gpu # 4 é o tamanho em bytes para float
+    dev_minimum = cuda.mem_alloc(np.float32().nbytes)
+
+    mem_info = cuda.mem_get_info()
+
+    print("Total free memory after allocating mm:", mem_info.free_memory)
+    print("Free memory in L1 memory pool:", mem_info.l1_free_memory)
+    print("Free memory in L2 memory pool:", mem_info.l2_free_memory)
+    print("Free memory in shared memory pool:", mem_info.shared_memory_free)
+    print("Alignment requirement for float32:", cuda.align_val(np.float32()))
+
+
+    #dev_evaluatedLineArray = cuda.to_device(host_evaluatedLineArray)
+    #dev_y = cuda.to_device(host_y)
+    #dev_minimum = cuda.to_device(host_minimum)
     
-    y_gpu = cuda.mem_alloc(N * 4) #alocar o tamanho do array output na memoria da gpu # 4 é o tamanho em bytes para float
-    #host_result = np.empty(N, dtype=np.float32)
-    minimum = cuda.mem_alloc(4)
-
     # Transferir dados para a GPU
-    cuda.memcpy_htod(y_gpu, y_np) #copiar o input para a gpu
-    #cuda.memcpy_htod(host_gpu, host)
+    cuda.memcpy_htod(dev_evaluatedLineArray, host_evaluatedLineArray) #copiar o input para a gpu
+    cuda.memcpy_htod(dev_y, host_y) #copiar o input para a gpu
+    cuda.memcpy_htod(dev_minimum, host_minimum) #copiar o input para a gpu
 
     #grid_size = N // block_size
     gridSize = (N + blocksNumber - 1) // blocksNumber
 
     # Executar o kernel na GPU
-    #score_kernel(d_result, d_data, block=(N, 1, 1), grid=(1, 1))
-    score_kernel(evaluated_line, minimum, y_gpu, block=(blocksNumber, 1, 1), grid=(gridSize, 1))
+    score_kernel(dev_evaluatedLineArray, dev_y, dev_minimum, block=(blocksNumber, 1, 1), grid=(gridSize, 1))
 
-    result = np.empty(1, dtype=np.float32)
     # Transferir resultados da GPU de volta para a CPU
-    #cuda.memcpy_dtoh(host_result, dev_result)
-    cuda.memcpy_dtoh(result, minimum)
+    cuda.memcpy_dtoh(host_minimum, dev_minimum)
 
     # Libertar recursos na GPU
-    #host_gpu.free()
-    #dev_result.free()
-    minimum.free()
+    dev_evaluatedLineArray.free()
+    dev_y.free()
+    dev_minimum.free()
 
-    return result
+    return host_minimum[0]
 
 #l = funs[0]
 #print(parallel_score(l) , l)
 #r = min([(parallel_score(evaluate_line(line)), line) for line in funs])
-r = [(parallel_score(line), line) for line in funs]
-print(f"{r[0]} {r[1]}")
+#r = [(parallel_score(line), line) for line in funs]
+r = parallel_score()
+print(f"{r[0]}")
+#print(f"{r[0]} {r[1]}")
