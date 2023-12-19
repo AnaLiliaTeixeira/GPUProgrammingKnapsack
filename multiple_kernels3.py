@@ -38,7 +38,7 @@ __global__ void score_kernel(double* evaluatedLineArray, double* y, double* mean
     linesEvaluated[threadIdx.x] = 0.0;
 
     // Cada thread calcula a soma parcial para o bloco
-    if (threadIdx.x < blockDim.x) {{
+    if (threadIdx.x < {BLOCK_SIZE}) {{
         linesEvaluated[threadIdx.x] += (evaluatedLineArray[threadIdx.x] - y[threadIdx.x]) *
                                        (evaluatedLineArray[threadIdx.x] - y[threadIdx.x]);
     }}
@@ -53,17 +53,14 @@ __global__ void score_kernel(double* evaluatedLineArray, double* y, double* mean
 
     // Apenas a primeira thread de todos os blocos realiza a redução final global
     if (idx == 0) {{
-        double globalMean = linesEvaluated[idx];
 
         // Redução entre os valores mínimos de cada bloco
-        for (int i = 1; i < gridDim.x; i++) {{
-            globalMean += linesEvaluated[i];
+        for (int i = 0; i < gridDim.x; i++) {{
+            mean[0] += linesEvaluated[i];
         }}
 
-        // O resultado final é armazenado em mean[0]
-        mean[0] = globalMean / {NUM_BLOCKS};
+        mean[0] /= {NUM_BLOCKS};
     }}
-
 }}
 """
 
