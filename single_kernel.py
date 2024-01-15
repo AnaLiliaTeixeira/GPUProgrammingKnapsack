@@ -11,30 +11,21 @@ N = len(df)
 funs = [line.strip() for line in open("functions.txt").readlines()]
 
 NUM_ROWS = len(funs)
-print(NUM_ROWS)
 NUM_COLUMNS = len(df) - 1
-print(NUM_COLUMNS)
 
 # Número de threads por bloco
 BLOCK_SIZE = 256
 
 # Número de blocos
 NUM_BLOCKS = (NUM_ROWS + BLOCK_SIZE - 1) // BLOCK_SIZE
-print(NUM_BLOCKS)
 
 # Definição do Kernel CUDA
-def evaluate_line(line):
-    for u in ["sinf", "cosf", "tanf", "sqrtf", "expf"]:
-        line = line.replace(u, f"np.{u[:-1]}")
-    for c in df.columns:
-        line = line.replace(f"_{c}_", f"(df[\"{c}\"].values)")
-    return eval(line)
-
 kernel_code = f""" 
-__global__ void score_kernel(float** evaluatedLineArray, float* y, float* minimum) 
+__global__ void score_kernel(double** evaluatedLineArray, double* y, double* minimum) 
 {{
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    __shared__ float linesEvaluated[{BLOCK_SIZE}];
+    __shared__ double linesEvaluated[{BLOCK_SIZE}];
+    linesEvaluated[threadIdx.x] = 0.0;
 
     // Cada thread calcula o valor mínimo para o bloco
     if (threadIdx.x < {BLOCK_SIZE}) {{
@@ -54,29 +45,23 @@ __global__ void score_kernel(float** evaluatedLineArray, float* y, float* minimu
                 linesEvaluated[threadIdx.x] = linesEvaluated[threadIdx.x + s];
             }}
         }}
-        __syncthreads();
     }}
+    __syncthreads();
 
     // A primeira thread do bloco armazena o valor mínimo para o bloco
     if (threadIdx.x == 0) {{
-        minimum[blockIdx.x] = linesEvaluated[0];
+        linesEvaluated[blockIdx.x] = linesEvaluated[0];
     }}
-
-    __syncthreads();
 
     // Apenas a primeira thread de todos os blocos realiza a redução final
     if (idx == 0) {{
-        float globalMinimum = minimum[0];
 
         // Redução entre os valores mínimos de cada bloco
         for (int i = 1; i < gridDim.x; i++) {{
-            if (minimum[i] < globalMinimum) {{
-                globalMinimum = minimum[i];
+            if (minimum[i] < minimum[0]) {{
+                minimum[0] = minimum[i];
             }}
         }}
-
-        // O resultado final é armazenado em minimum[0]
-        minimum[0] = globalMinimum;
     }}
 }}
 """
@@ -84,28 +69,31 @@ __global__ void score_kernel(float** evaluatedLineArray, float* y, float* minimu
 # Compilação do Kernel CUDA
 score_kernel = SourceModule(kernel_code).get_function("score_kernel")
 
+def evaluate_line(line):
+    for u in ["sinf", "cosf", "tanf", "sqrtf", "expf"]:
+        line = line.replace(u, f"np.{u[:-1]}")
+    for c in df.columns:
+        line = line.replace(f"_{c}_", f"(df[\"{c}\"].values)")
+    return eval(line)
+    
 def parallel_score():
-    # Criar host_evaluatedLineArray com tratamento de nan
-    host_evaluatedLineArray = np.array(np.nan_to_num([evaluate_line(line) for line in funs]), dtype=np.float32)
-    host_y = np.array(df["y"], dtype=np.float32)
-    host_minimum = np.zeros(1, dtype=np.float32)
+    # Criar host_evaluatedLineArray com tratamento de valores Nan
+    host_evaluatedLineArray = np.array(np.nan_to_num([evaluate_line(line) for line in funs]), dtype=np.double)
+    host_y = np.array(df["y"], dtype=np.double)
+    host_minimum = np.zeros(1, dtype=np.double)
 
-    # Alocar memória na GPU
+    # Alocar memória na GPU e transferir os dados para a GPU
     dev_evaluatedLineArray = cuda.to_device(host_evaluatedLineArray)
     dev_y = cuda.to_device(host_y)
     dev_minimum = cuda.to_device(host_minimum)
 
-    print("Vou agora executar o kernel")
     # Executar o kernel na GPU
     score_kernel(dev_evaluatedLineArray, dev_y, dev_minimum, block=(BLOCK_SIZE, 1, 1), grid=(NUM_BLOCKS, 1, 1))
-    print("Acabei agora de executar o kernel")
 
     # Transferir resultados da GPU de volta para a CPU
     cuda.memcpy_dtoh(host_minimum, dev_minimum)
-    print("Acabei agora de receber o output do kernel")
-    print("minimum = ", host_minimum[0])
 
     return host_minimum[0]
 
 r = parallel_score()
-print(f"{r}")
+print(f"Minimum of all functions = {r}")
